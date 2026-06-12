@@ -1,0 +1,53 @@
+ARG OMNI_IMAGE=vllm/vllm-omni:v0.22.0
+FROM ${OMNI_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TARGETPLATFORM
+ARG TARGETARCH
+ARG TRANSFORMERS_REPO=https://github.com/gabe-engineers/transformers.git
+ARG TRANSFORMERS_REF=fix/hqq-nested-checkpoint-load
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/workspace/.cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub \
+    TMPDIR=/workspace/tmp \
+    TMP=/workspace/tmp \
+    TEMP=/workspace/tmp \
+    DIFFUSERS_SRC=/opt/src/diffusers \
+    TRANSFORMERS_SRC=/opt/src/transformers \
+    PYTHONPATH=/opt/src/diffusers/src:/opt/src/transformers/src \
+    MODEL_REPO=gabe-engineers/bonsai-image-ternary-4B-gemlite-2bit \
+    INSPECT_STATE_DICTS=0 \
+    TRANSFORMERS_REPO=${TRANSFORMERS_REPO} \
+    TRANSFORMERS_REF=${TRANSFORMERS_REF} \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/src/diffusers
+
+COPY . /opt/src/diffusers
+COPY scripts/runpod_bonsai_entrypoint.sh /usr/local/bin/runpod-bonsai-entrypoint
+
+RUN test "${TARGETARCH}" = "amd64" || (echo "This Runpod image targets linux/amd64, got ${TARGETPLATFORM}" && exit 1)
+
+RUN python -m pip install --upgrade pip wheel "setuptools<82" && \
+    python -m pip install \
+        accelerate \
+        protobuf \
+        sentencepiece && \
+    git clone --depth 1 --branch ${TRANSFORMERS_REF} ${TRANSFORMERS_REPO} /opt/src/transformers && \
+    python -m pip install --no-deps -e /opt/src/transformers && \
+    python -m pip install --no-deps -e . && \
+    python -m pip install hqq gemlite && \
+    chmod +x /usr/local/bin/runpod-bonsai-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/runpod-bonsai-entrypoint"]
+CMD ["sleep", "infinity"]
