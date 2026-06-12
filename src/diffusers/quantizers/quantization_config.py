@@ -45,6 +45,7 @@ logger = logging.get_logger(__name__)
 class QuantizationMethod(str, Enum):
     BITS_AND_BYTES = "bitsandbytes"
     GGUF = "gguf"
+    GEMLITE = "gemlite"
     TORCHAO = "torchao"
     QUANTO = "quanto"
     MODELOPT = "modelopt"
@@ -427,6 +428,44 @@ class GGUFQuantizationConfig(QuantizationConfigMixin):
 
         if self.compute_dtype is None:
             self.compute_dtype = torch.float32
+
+
+@dataclass
+class GemLiteConfig(QuantizationConfigMixin):
+    """This is a config class for loading GemLite-serialized quantized checkpoints.
+
+    Args:
+        compute_dtype (`torch.dtype`, *optional*, defaults to `torch.float16`):
+            The compute dtype used by non-quantized modules and as a fallback when GemLite metadata does not encode a
+            dtype.
+        modules_to_not_convert (`list[str]` or `str`, *optional*):
+            The list of modules to not replace with GemLite linear layers.
+    """
+
+    def __init__(self, compute_dtype: "torch.dtype" | str | None = None, modules_to_not_convert=None, **kwargs):
+        self.quant_method = QuantizationMethod.GEMLITE
+        self.compute_dtype = compute_dtype
+        self.pre_quantized = True
+        self.modules_to_not_convert = modules_to_not_convert
+
+        if self.compute_dtype is None:
+            self.compute_dtype = torch.float16
+        elif isinstance(self.compute_dtype, str):
+            self.compute_dtype = getattr(torch, self.compute_dtype)
+
+    def to_dict(self) -> dict[str, Any]:
+        output = copy.deepcopy(self.__dict__)
+        output["compute_dtype"] = str(output["compute_dtype"]).split(".")[1]
+        return output
+
+    def to_diff_dict(self) -> dict[str, Any]:
+        config_dict = self.to_dict()
+        default_config_dict = GemLiteConfig().to_dict()
+        serializable_config_dict = {"quant_method": config_dict["quant_method"]}
+        for key, value in config_dict.items():
+            if value != default_config_dict[key]:
+                serializable_config_dict[key] = value
+        return serializable_config_dict
 
 
 @dataclass

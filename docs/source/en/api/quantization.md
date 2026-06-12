@@ -30,6 +30,10 @@ Quantization techniques reduce memory and computational costs by representing we
 
 [[autodoc]] quantizers.quantization_config.GGUFQuantizationConfig
 
+## GemLiteConfig
+
+[[autodoc]] quantizers.quantization_config.GemLiteConfig
+
 ## QuantoConfig
 
 [[autodoc]] quantizers.quantization_config.QuantoConfig

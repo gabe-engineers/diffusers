@@ -82,6 +82,7 @@ from .import_utils import (
     is_flashpack_available,
     is_flax_available,
     is_ftfy_available,
+    is_gemlite_available,
     is_gguf_available,
     is_gguf_version,
     is_google_colab,

@@ -236,6 +236,12 @@ def load_model_dict_into_meta(
         if param_name not in empty_state_dict:
             continue
 
+        is_pre_quantized_param = (
+            is_quantized
+            and hf_quantizer.pre_quantized
+            and hf_quantizer.check_if_quantized_param(model, param, param_name, state_dict)
+        )
+
         set_module_kwargs = {}
         # We convert floating dtypes to the `dtype` passed. We also want to keep the buffers/params
         # in int/uint/bool and not cast them.
@@ -248,6 +254,8 @@ def load_model_dict_into_meta(
                 set_module_kwargs["dtype"] = torch.float32
             # For quantizers have save weights using torch.float8_e4m3fn
             elif hf_quantizer is not None and param.dtype == getattr(torch, "float8_e4m3fn", None):
+                pass
+            elif is_pre_quantized_param:
                 pass
             else:
                 param = param.to(dtype)
@@ -268,7 +276,7 @@ def load_model_dict_into_meta(
         if not isinstance(old_param, (torch.nn.Parameter, torch.Tensor)):
             old_param = None
 
-        if old_param is not None:
+        if old_param is not None and not is_pre_quantized_param:
             if dtype is None:
                 param = param.to(old_param.dtype)
 
@@ -280,7 +288,7 @@ def load_model_dict_into_meta(
         # bnb params are flattened.
         # gguf quants have a different shape based on the type of quantization applied
         if empty_state_dict[param_name].shape != param.shape:
-            if (
+            if is_pre_quantized_param or (
                 is_quantized
                 and hf_quantizer.pre_quantized
                 and hf_quantizer.check_if_quantized_param(
