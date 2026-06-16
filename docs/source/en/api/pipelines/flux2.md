@@ -44,6 +44,12 @@ The [official implementation](https://github.com/black-forest-labs/flux2/blob/5a
 	- all
 	- __call__
 
+## Flux2BonsaiPipeline
+
+[[autodoc]] Flux2BonsaiPipeline
+	- all
+	- __call__
+
 ## Flux2KleinKVPipeline
 
 [[autodoc]] Flux2KleinKVPipeline

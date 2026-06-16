@@ -22,6 +22,7 @@ except OptionalDependencyNotAvailable:
 
     _dummy_objects.update(get_objects_from_module(dummy_torch_and_transformers_objects))
 else:
+    _import_structure["pipeline_flux2_bonsai"] = ["Flux2BonsaiPipeline"]
     _import_structure["pipeline_flux2"] = ["Flux2Pipeline"]
     _import_structure["pipeline_flux2_klein"] = ["Flux2KleinPipeline"]
     _import_structure["pipeline_flux2_klein_inpaint"] = ["Flux2KleinInpaintPipeline"]
@@ -33,6 +34,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     except OptionalDependencyNotAvailable:
         from ...utils.dummy_torch_and_transformers_objects import *  # noqa F403
     else:
+        from .pipeline_flux2_bonsai import Flux2BonsaiPipeline
         from .pipeline_flux2 import Flux2Pipeline
         from .pipeline_flux2_klein import Flux2KleinPipeline
         from .pipeline_flux2_klein_inpaint import Flux2KleinInpaintPipeline

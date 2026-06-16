@@ -172,6 +172,7 @@ else:
     _import_structure["bria"] = ["BriaPipeline"]
     _import_structure["bria_fibo"] = ["BriaFiboPipeline", "BriaFiboEditPipeline"]
     _import_structure["flux2"] = [
+        "Flux2BonsaiPipeline",
         "Flux2Pipeline",
         "Flux2KleinPipeline",
         "Flux2KleinInpaintPipeline",
@@ -743,7 +744,13 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             FluxPriorReduxPipeline,
             ReduxImageEncoder,
         )
-        from .flux2 import Flux2KleinInpaintPipeline, Flux2KleinKVPipeline, Flux2KleinPipeline, Flux2Pipeline
+        from .flux2 import (
+            Flux2BonsaiPipeline,
+            Flux2KleinInpaintPipeline,
+            Flux2KleinKVPipeline,
+            Flux2KleinPipeline,
+            Flux2Pipeline,
+        )
         from .glm_image import GlmImagePipeline
         from .helios import HeliosPipeline, HeliosPyramidPipeline
         from .hidream_image import HiDreamImagePipeline
