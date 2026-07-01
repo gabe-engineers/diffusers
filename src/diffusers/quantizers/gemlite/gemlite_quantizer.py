@@ -90,7 +90,6 @@ def _quantize_linears_on_the_fly(
     from gemlite.helper import A16W8_FP8, A16W8_INT8
 
     quantized = 0
-    helper_cls = {"int8": A16W8_INT8, "fp8": A16W8_FP8}[weight_quant_format]
 
     def visit(module: "nn.Module", prefix: str = "") -> None:
         nonlocal quantized
@@ -115,7 +114,11 @@ def _quantize_linears_on_the_fly(
                     )
                     visit(child, child_name)
                     continue
-                helper = helper_cls(device=str(device), dtype=compute_dtype)
+                if weight_quant_format == "fp8":
+                    # A6000/Ampere Triton supports fp8e5 but not fp8e4nv.
+                    helper = A16W8_FP8(device=str(device), dtype=compute_dtype, fp8=torch.float8_e5m2)
+                else:
+                    helper = A16W8_INT8(device=str(device), dtype=compute_dtype)
                 setattr(module, name, helper.from_linear(child))
                 quantized += 1
             else:
@@ -296,6 +299,26 @@ class GemLiteQuantizer(DiffusersQuantizer):
                     if getattr(module, name, None) is not None
                 }
                 module.load_state_dict(state_dict)
+                # GemLite converts metadata/orig_shape to plain Python containers during load_state_dict().
+                # Register tensor copies again so save_pretrained() can emit a complete pre-quantized checkpoint.
+                setattr(
+                    module,
+                    "metadata",
+                    torch.nn.Parameter(
+                        torch.tensor(module.get_meta_args(), device=module.W_q.device, dtype=torch.int32),
+                        requires_grad=False,
+                    ),
+                )
+                setattr(
+                    module,
+                    "orig_shape",
+                    torch.nn.Parameter(
+                        torch.tensor(
+                            [module.out_features, module.in_features], device=module.W_q.device, dtype=torch.int32
+                        ),
+                        requires_grad=False,
+                    ),
+                )
         return model
 
     @property

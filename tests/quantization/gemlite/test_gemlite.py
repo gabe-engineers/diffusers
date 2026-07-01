@@ -232,8 +232,7 @@ class GemLiteQuantizerBackendTest(unittest.TestCase):
 
         self.assertEqual(quantized, 1)
         self.assertIsInstance(model[0], GemLiteLinearTriton)
-        self.assertTrue(model[0].W_q.is_floating_point())
-        self.assertEqual(model[0].W_q.element_size(), 1)
+        self.assertEqual(model[0].W_q.dtype, torch.float8_e5m2)
 
     @require_accelerator
     def test_quantize_linears_on_the_fly_rejects_cpu_model(self):
