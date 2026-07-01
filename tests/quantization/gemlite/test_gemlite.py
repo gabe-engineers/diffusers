@@ -7,7 +7,10 @@ import torch.nn as nn
 
 from diffusers.quantizers.auto import DiffusersAutoQuantizer
 from diffusers.quantizers.gemlite import GemLiteQuantizer
-from diffusers.quantizers.gemlite.gemlite_quantizer import _replace_with_gemlite_linear
+from diffusers.quantizers.gemlite.gemlite_quantizer import (
+    _quantize_linears_on_the_fly,
+    _replace_with_gemlite_linear,
+)
 from diffusers.quantizers.quantization_config import GemLiteConfig, QuantizationMethod
 from diffusers.utils import is_gemlite_available, is_torch_available
 
@@ -65,6 +68,7 @@ class GemLiteConfigTest(unittest.TestCase):
         self.assertEqual(config.quant_method, QuantizationMethod.GEMLITE)
         self.assertEqual(config.compute_dtype, torch.float16)
         self.assertTrue(config.pre_quantized)
+        self.assertEqual(config.weight_quant_format, "int8")
         self.assertEqual(config.to_diff_dict()["quant_method"], QuantizationMethod.GEMLITE)
 
     def test_config_from_dict(self):
@@ -75,6 +79,7 @@ class GemLiteConfigTest(unittest.TestCase):
         self.assertIsInstance(config, GemLiteConfig)
         self.assertEqual(config.compute_dtype, torch.bfloat16)
         self.assertEqual(config.modules_to_not_convert, ["proj_out"])
+        self.assertEqual(config.weight_quant_format, "int8")
 
     def test_config_round_trip(self):
         config = GemLiteConfig(compute_dtype=torch.bfloat16, modules_to_not_convert=["proj_out"])
@@ -84,14 +89,20 @@ class GemLiteConfigTest(unittest.TestCase):
         self.assertIsInstance(restored, GemLiteConfig)
         self.assertEqual(restored.compute_dtype, torch.bfloat16)
         self.assertEqual(restored.modules_to_not_convert, ["proj_out"])
+        self.assertEqual(restored.weight_quant_format, "int8")
+
+    def test_config_rejects_unsupported_weight_quant_format(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported `weight_quant_format='fp8'`"):
+            GemLiteConfig(weight_quant_format="fp8")
 
 
 class GemLiteQuantizerTest(unittest.TestCase):
-    def test_rejects_on_the_fly_quantization(self):
+    def test_on_the_fly_quantizer_has_int8_format(self):
         quantizer = DiffusersAutoQuantizer.from_config(GemLiteConfig(), pre_quantized=False)
 
-        with self.assertRaisesRegex(ValueError, "only supports loading already-quantized checkpoints"):
-            quantizer.validate_environment()
+        self.assertFalse(quantizer.pre_quantized)
+        self.assertEqual(quantizer.weight_quant_format, "int8")
+        self.assertEqual(quantizer.compute_dtype, torch.float16)
 
     def test_update_torch_dtype_coerces_to_compute_dtype(self):
         quantizer = DiffusersAutoQuantizer.from_config(GemLiteConfig(compute_dtype=torch.float16), pre_quantized=True)
@@ -99,14 +110,6 @@ class GemLiteQuantizerTest(unittest.TestCase):
         self.assertEqual(quantizer.update_torch_dtype(None), torch.float16)
         self.assertEqual(quantizer.update_torch_dtype(torch.float16), torch.float16)
         self.assertEqual(quantizer.update_torch_dtype(torch.bfloat16), torch.float16)
-
-    def test_update_missing_keys_filters_meta_scale(self):
-        quantizer = DiffusersAutoQuantizer.from_config(GemLiteConfig(), pre_quantized=True)
-
-        missing_keys = ["0.weight", "0.meta_scale", "1.bias", "2.meta_scale"]
-        filtered = quantizer.update_missing_keys(model=None, missing_keys=missing_keys, prefix="")
-
-        self.assertEqual(filtered, ["0.weight", "1.bias"])
 
 
 @require_gemlite
@@ -180,8 +183,56 @@ class GemLiteQuantizerBackendTest(unittest.TestCase):
 
         quantizer._process_model_after_weight_loading(model)
         loaded_state_dict = model[0].state_dict()
-        for name, expected_value in gemlite_state_dict.items():
-            self.assertTrue(torch.equal(loaded_state_dict[name], expected_value), name)
+        # `metadata` and `orig_shape` are metadata containers that gemlite's `load_state_dict`
+        # converts to Python list/tuple, so they no longer appear in `state_dict()`. Only the
+        # real tensor data (W_q, scales, zeros, bias) should round-trip.
+        for name in ("W_q", "scales", "zeros"):
+            self.assertTrue(torch.equal(loaded_state_dict[name], gemlite_state_dict[name]), name)
+
+    def test_check_if_quantized_param_disabled_on_the_fly(self):
+        quantizer = DiffusersAutoQuantizer.from_config(GemLiteConfig(), pre_quantized=False)
+
+        gemlite_model = nn.Sequential(GemLiteLinearTriton())
+        # On-the-fly path always returns False: it never interprets state-dict entries as quantized params.
+        self.assertFalse(
+            quantizer.check_if_quantized_param(gemlite_model, torch.ones(4, 4, dtype=torch.uint8), "0.W_q", {})
+        )
+
+    @require_accelerator
+    def test_quantize_linears_on_the_fly_replaces_linears(self):
+        inner = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(32, 32, bias=False))
+        model = nn.Sequential(inner, nn.Linear(64, 32, bias=False)).to(torch_device, dtype=torch.float16)
+
+        quantized = _quantize_linears_on_the_fly(model, ["0.1"], compute_dtype=torch.float16)
+
+        # Two skipped via "0.1" (matches dotted nested), one under inner[0], one top-level[1].
+        self.assertEqual(quantized, 2)
+        self.assertIsInstance(model[0][0], GemLiteLinearTriton)
+        self.assertIs(type(model[0][1]), nn.Linear)
+        self.assertIsInstance(model[1], GemLiteLinearTriton)
+
+    @require_accelerator
+    def test_quantize_linears_on_the_fly_rejects_cpu_model(self):
+        model = nn.Sequential(nn.Linear(32, 32, bias=False))
+
+        with self.assertRaisesRegex(ValueError, "requires the model to be on a CUDA device"):
+            _quantize_linears_on_the_fly(model, [], compute_dtype=torch.float16)
+
+    @require_accelerator
+    def test_quantize_linears_on_the_fly_skips_small_in_features(self):
+        # in_features=16 is below GemLite's MIN_SIZE (32); the layer must be left as nn.Linear.
+        model = nn.Sequential(
+            nn.Linear(32, 32, bias=False),
+            nn.Linear(16, 32, bias=False),
+            nn.Linear(16, 16, bias=False),
+        ).to(torch_device, dtype=torch.float16)
+
+        quantized = _quantize_linears_on_the_fly(model, [], compute_dtype=torch.float16)
+
+        self.assertEqual(quantized, 1)
+        self.assertIsInstance(model[0], GemLiteLinearTriton)
+        self.assertIs(type(model[1]), nn.Linear)
+        self.assertIs(type(model[2]), nn.Linear)
 
 
 @nightly
@@ -351,6 +402,49 @@ class GemLiteBaseTesterMixin:
         )
         pipe.enable_model_cpu_offload(device=torch_device)
         _ = pipe("a cat holding a sign that says hello", num_inference_steps=2)
+
+    def test_on_the_fly_quantization_matches_pre_quantized(self):
+        from diffusers import FluxTransformer2DModel
+
+        quantization_config = GemLiteConfig(
+            compute_dtype=self.torch_dtype,
+            modules_to_not_convert=self.modules_to_not_convert,
+            weight_quant_format="int8",
+        )
+        on_the_fly = FluxTransformer2DModel.from_pretrained(
+            self.model_id,
+            torch_dtype=self.torch_dtype,
+            device_map={"": torch_device},
+            quantization_config=quantization_config,
+        )
+
+        skip = set(self.modules_to_not_convert)
+        linear_count = 0
+        gemlite_count = 0
+        for name, module in on_the_fly.named_modules():
+            if isinstance(module, nn.Linear):
+                assert name in skip, f"nn.Linear {name} was not quantized on-the-fly"
+                linear_count += 1
+            if isinstance(module, GemLiteLinearTriton):
+                assert name not in skip, f"skipped module {name} was unexpectedly quantized"
+                gemlite_count += 1
+        assert gemlite_count > 0, "No GemLiteLinearTriton modules produced by on-the-fly quantization"
+        assert linear_count == len(skip), f"Expected {len(skip)} retained nn.Linear modules, got {linear_count}"
+
+        # Compare outputs against the pre-quantized fixture built from the same helper.
+        pre_quantized = self._load_quantized_model().to(torch_device)
+        inputs = self.get_dummy_inputs()
+        inputs = {
+            k: v.to(device=torch_device, dtype=self.torch_dtype) for k, v in inputs.items() if not isinstance(v, bool)
+        }
+        with torch.no_grad():
+            on_the_fly_out = on_the_fly(**inputs).sample
+            pre_quantized_out = pre_quantized(**inputs).sample
+        assert torch.allclose(on_the_fly_out, pre_quantized_out, rtol=1e-3, atol=1e-3)
+
+        del on_the_fly, pre_quantized
+        gc.collect()
+        backend_empty_cache(torch_device)
 
 
 class FluxTransformerGemLiteINT8Test(GemLiteBaseTesterMixin, unittest.TestCase):

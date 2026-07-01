@@ -432,26 +432,52 @@ class GGUFQuantizationConfig(QuantizationConfigMixin):
 
 @dataclass
 class GemLiteConfig(QuantizationConfigMixin):
-    """This is a config class for loading GemLite-serialized quantized checkpoints.
+    """This is a config class for GemLite quantization.
+
+    GemLite can be used in two modes:
+
+    - **Pre-quantized loading** (`pre_quantized=True`, the default): loads a checkpoint whose linear layers were
+      already serialized as `GemLiteLinearTriton` modules (`W_q`, `scales`, `zeros`, `metadata`, ... tensors).
+    - **On-the-fly quantization** (`pre_quantized=False`): load a regular fp16/bf16 checkpoint and quantize its
+      `nn.Linear` layers in-place at load time using a GemLite helper. Only one scheme is supported initially:
+      `weight_quant_format="int8"` (the `A16W8_INT8` helper, i.e. INT8 channel-wise weight-only quantization).
 
     Args:
         compute_dtype (`torch.dtype`, *optional*, defaults to `torch.float16`):
             The compute dtype used by non-quantized modules and as a fallback when GemLite metadata does not encode a
-            dtype.
+            dtype. For on-the-fly quantization this is the dtype used to pack and run the quantized weights.
         modules_to_not_convert (`list[str]` or `str`, *optional*):
             The list of modules to not replace with GemLite linear layers.
+        weight_quant_format (`str`, *optional*, defaults to `"int8"`):
+            On-the-fly quantization scheme. Only `"int8"` (A16W8 INT8 weight-only) is currently supported. Ignored
+            when loading a pre-quantized checkpoint.
     """
 
-    def __init__(self, compute_dtype: "torch.dtype" | str | None = None, modules_to_not_convert=None, **kwargs):
+    _SUPPORTED_WEIGHT_QUANT_FORMATS = ("int8",)
+
+    def __init__(
+        self,
+        compute_dtype: "torch.dtype" | str | None = None,
+        modules_to_not_convert=None,
+        weight_quant_format: str = "int8",
+        **kwargs,
+    ):
         self.quant_method = QuantizationMethod.GEMLITE
         self.compute_dtype = compute_dtype
         self.pre_quantized = True
         self.modules_to_not_convert = modules_to_not_convert
+        self.weight_quant_format = weight_quant_format
 
         if self.compute_dtype is None:
             self.compute_dtype = torch.float16
         elif isinstance(self.compute_dtype, str):
             self.compute_dtype = getattr(torch, self.compute_dtype)
+
+        if self.weight_quant_format not in self._SUPPORTED_WEIGHT_QUANT_FORMATS:
+            raise ValueError(
+                f"Unsupported `weight_quant_format={self.weight_quant_format!r}` for GemLite on-the-fly quantization. "
+                f"Supported values are: {list(self._SUPPORTED_WEIGHT_QUANT_FORMATS)}."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         output = copy.deepcopy(self.__dict__)
