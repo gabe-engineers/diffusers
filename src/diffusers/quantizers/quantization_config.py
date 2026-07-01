@@ -439,8 +439,9 @@ class GemLiteConfig(QuantizationConfigMixin):
     - **Pre-quantized loading** (`pre_quantized=True`, the default): loads a checkpoint whose linear layers were
       already serialized as `GemLiteLinearTriton` modules (`W_q`, `scales`, `zeros`, `metadata`, ... tensors).
     - **On-the-fly quantization** (`pre_quantized=False`): load a regular fp16/bf16 checkpoint and quantize its
-      `nn.Linear` layers in-place at load time using a GemLite helper. Only one scheme is supported initially:
-      `weight_quant_format="int8"` (the `A16W8_INT8` helper, i.e. INT8 channel-wise weight-only quantization).
+      `nn.Linear` layers in-place at load time using a GemLite helper. Supported schemes are
+      `weight_quant_format="int8"` (the `A16W8_INT8` helper) and `weight_quant_format="fp8"` (the `A16W8_FP8`
+      helper), both channel-wise weight-only quantization.
 
     Args:
         compute_dtype (`torch.dtype`, *optional*, defaults to `torch.float16`):
@@ -449,11 +450,11 @@ class GemLiteConfig(QuantizationConfigMixin):
         modules_to_not_convert (`list[str]` or `str`, *optional*):
             The list of modules to not replace with GemLite linear layers.
         weight_quant_format (`str`, *optional*, defaults to `"int8"`):
-            On-the-fly quantization scheme. Only `"int8"` (A16W8 INT8 weight-only) is currently supported. Ignored
-            when loading a pre-quantized checkpoint.
+            On-the-fly quantization scheme. Supported values are `"int8"` (A16W8 INT8 weight-only) and `"fp8"`
+            (A16W8 FP8 weight-only). Ignored when loading a pre-quantized checkpoint.
     """
 
-    _SUPPORTED_WEIGHT_QUANT_FORMATS = ("int8",)
+    _SUPPORTED_WEIGHT_QUANT_FORMATS = ("int8", "fp8")
 
     def __init__(
         self,

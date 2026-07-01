@@ -82,18 +82,20 @@ class GemLiteConfigTest(unittest.TestCase):
         self.assertEqual(config.weight_quant_format, "int8")
 
     def test_config_round_trip(self):
-        config = GemLiteConfig(compute_dtype=torch.bfloat16, modules_to_not_convert=["proj_out"])
+        config = GemLiteConfig(
+            compute_dtype=torch.bfloat16, modules_to_not_convert=["proj_out"], weight_quant_format="fp8"
+        )
 
         restored = DiffusersAutoQuantizer.from_dict(config.to_dict())
 
         self.assertIsInstance(restored, GemLiteConfig)
         self.assertEqual(restored.compute_dtype, torch.bfloat16)
         self.assertEqual(restored.modules_to_not_convert, ["proj_out"])
-        self.assertEqual(restored.weight_quant_format, "int8")
+        self.assertEqual(restored.weight_quant_format, "fp8")
 
     def test_config_rejects_unsupported_weight_quant_format(self):
-        with self.assertRaisesRegex(ValueError, "Unsupported `weight_quant_format='fp8'`"):
-            GemLiteConfig(weight_quant_format="fp8")
+        with self.assertRaisesRegex(ValueError, "Unsupported `weight_quant_format='int4'`"):
+            GemLiteConfig(weight_quant_format="int4")
 
 
 class GemLiteQuantizerTest(unittest.TestCase):
@@ -102,6 +104,13 @@ class GemLiteQuantizerTest(unittest.TestCase):
 
         self.assertFalse(quantizer.pre_quantized)
         self.assertEqual(quantizer.weight_quant_format, "int8")
+        self.assertEqual(quantizer.compute_dtype, torch.float16)
+
+    def test_on_the_fly_quantizer_has_fp8_format(self):
+        quantizer = DiffusersAutoQuantizer.from_config(GemLiteConfig(weight_quant_format="fp8"), pre_quantized=False)
+
+        self.assertFalse(quantizer.pre_quantized)
+        self.assertEqual(quantizer.weight_quant_format, "fp8")
         self.assertEqual(quantizer.compute_dtype, torch.float16)
 
     def test_update_torch_dtype_coerces_to_compute_dtype(self):
@@ -203,7 +212,9 @@ class GemLiteQuantizerBackendTest(unittest.TestCase):
         inner = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(32, 32, bias=False))
         model = nn.Sequential(inner, nn.Linear(64, 32, bias=False)).to(torch_device, dtype=torch.float16)
 
-        quantized = _quantize_linears_on_the_fly(model, ["0.1"], compute_dtype=torch.float16)
+        quantized = _quantize_linears_on_the_fly(
+            model, ["0.1"], compute_dtype=torch.float16, weight_quant_format="int8"
+        )
 
         # Two skipped via "0.1" (matches dotted nested), one under inner[0], one top-level[1].
         self.assertEqual(quantized, 2)
@@ -212,11 +223,24 @@ class GemLiteQuantizerBackendTest(unittest.TestCase):
         self.assertIsInstance(model[1], GemLiteLinearTriton)
 
     @require_accelerator
+    def test_quantize_linears_on_the_fly_supports_fp8(self):
+        model = nn.Sequential(nn.Linear(32, 32, bias=False)).to(torch_device, dtype=torch.float16)
+
+        quantized = _quantize_linears_on_the_fly(
+            model, [], compute_dtype=torch.float16, weight_quant_format="fp8"
+        )
+
+        self.assertEqual(quantized, 1)
+        self.assertIsInstance(model[0], GemLiteLinearTriton)
+        self.assertTrue(model[0].W_q.is_floating_point())
+        self.assertEqual(model[0].W_q.element_size(), 1)
+
+    @require_accelerator
     def test_quantize_linears_on_the_fly_rejects_cpu_model(self):
         model = nn.Sequential(nn.Linear(32, 32, bias=False))
 
         with self.assertRaisesRegex(ValueError, "requires the model to be on a CUDA device"):
-            _quantize_linears_on_the_fly(model, [], compute_dtype=torch.float16)
+            _quantize_linears_on_the_fly(model, [], compute_dtype=torch.float16, weight_quant_format="int8")
 
     @require_accelerator
     def test_quantize_linears_on_the_fly_skips_small_in_features(self):
@@ -227,7 +251,9 @@ class GemLiteQuantizerBackendTest(unittest.TestCase):
             nn.Linear(16, 16, bias=False),
         ).to(torch_device, dtype=torch.float16)
 
-        quantized = _quantize_linears_on_the_fly(model, [], compute_dtype=torch.float16)
+        quantized = _quantize_linears_on_the_fly(
+            model, [], compute_dtype=torch.float16, weight_quant_format="int8"
+        )
 
         self.assertEqual(quantized, 1)
         self.assertIsInstance(model[0], GemLiteLinearTriton)
@@ -246,37 +272,27 @@ class GemLiteBaseTesterMixin:
     torch_dtype = torch.float16
     expected_memory_reduction = 1.1
     modules_to_not_convert = ["proj_out"]
+    weight_quant_format = "int8"
 
     @classmethod
     def setUpClass(cls):
-        from gemlite.helper import A16W8_INT8
-
         from diffusers import FluxTransformer2DModel
-        from diffusers.configuration_utils import FrozenDict
 
         cls._tmpdir = tempfile.TemporaryDirectory()
 
-        model = FluxTransformer2DModel.from_pretrained(cls.model_id, torch_dtype=cls.torch_dtype).to(torch_device)
-
-        quantizer_helper = A16W8_INT8(device=str(torch_device), dtype=cls.torch_dtype)
-        skip_set = set(cls.modules_to_not_convert)
-        for name, module in model.named_modules():
-            if not isinstance(module, nn.Linear):
-                continue
-            if any((key + "." in name) or (key == name) for key in skip_set):
-                continue
-            parent, child_name = _get_parent_and_child(model, name)
-            setattr(parent, child_name, quantizer_helper.from_linear(module))
-
-        config_dict = dict(model._internal_dict)
-        config_dict["quantization_config"] = GemLiteConfig(
-            compute_dtype=cls.torch_dtype, modules_to_not_convert=cls.modules_to_not_convert
-        ).to_dict()
-        model._internal_dict = FrozenDict(config_dict)
-
+        quantization_config = GemLiteConfig(
+            compute_dtype=cls.torch_dtype,
+            modules_to_not_convert=cls.modules_to_not_convert,
+            weight_quant_format=cls.weight_quant_format,
+        )
+        model = FluxTransformer2DModel.from_pretrained(
+            cls.model_id,
+            torch_dtype=cls.torch_dtype,
+            device_map={"": torch_device},
+            quantization_config=quantization_config,
+        )
         model.save_pretrained(cls._tmpdir.name)
 
-        model.cpu()
         del model
         gc.collect()
         backend_empty_cache(torch_device)
@@ -409,7 +425,7 @@ class GemLiteBaseTesterMixin:
         quantization_config = GemLiteConfig(
             compute_dtype=self.torch_dtype,
             modules_to_not_convert=self.modules_to_not_convert,
-            weight_quant_format="int8",
+            weight_quant_format=self.weight_quant_format,
         )
         on_the_fly = FluxTransformer2DModel.from_pretrained(
             self.model_id,
@@ -431,7 +447,7 @@ class GemLiteBaseTesterMixin:
         assert gemlite_count > 0, "No GemLiteLinearTriton modules produced by on-the-fly quantization"
         assert linear_count == len(skip), f"Expected {len(skip)} retained nn.Linear modules, got {linear_count}"
 
-        # Compare outputs against the pre-quantized fixture built from the same helper.
+        # Compare outputs against the saved pre-quantized fixture built from the same GemLite format.
         pre_quantized = self._load_quantized_model().to(torch_device)
         inputs = self.get_dummy_inputs()
         inputs = {
@@ -451,12 +467,8 @@ class FluxTransformerGemLiteINT8Test(GemLiteBaseTesterMixin, unittest.TestCase):
     expected_memory_reduction = 1.2
 
 
-def _get_parent_and_child(model, full_name):
-    parts = full_name.split(".")
-    parent = model
-    for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
+class FluxTransformerGemLiteFP8Test(GemLiteBaseTesterMixin, unittest.TestCase):
+    weight_quant_format = "fp8"
 
 
 if __name__ == "__main__":

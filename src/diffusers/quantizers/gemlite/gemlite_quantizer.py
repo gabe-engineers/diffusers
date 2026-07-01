@@ -77,17 +77,20 @@ def _replace_with_gemlite_linear(model: "ModelMixin", modules_to_not_convert: li
     return replace(model)
 
 
-def _quantize_linears_on_the_fly(model: "ModelMixin", modules_to_not_convert: list[str], compute_dtype) -> int:
-    """Replace every eligible ``nn.Linear`` with a packed ``GemLiteLinearTriton`` (A16W8 INT8 weight-only).
+def _quantize_linears_on_the_fly(
+    model: "ModelMixin", modules_to_not_convert: list[str], compute_dtype, weight_quant_format: str = "int8"
+) -> int:
+    """Replace every eligible ``nn.Linear`` with a packed ``GemLiteLinearTriton``.
 
     Layers that the GemLite kernel cannot pack (``in_features`` not divisible by 32, the kernel's minimum
     size) are left untouched in their original dtype. This keeps diffusion transformers with small
     projection layers (e.g. time/guidance embeddings) loadable without manual skip-lists.
     """
     from gemlite.core import GemLiteLinearTriton
-    from gemlite.helper import A16W8_INT8
+    from gemlite.helper import A16W8_FP8, A16W8_INT8
 
     quantized = 0
+    helper_cls = {"int8": A16W8_INT8, "fp8": A16W8_FP8}[weight_quant_format]
 
     def visit(module: "nn.Module", prefix: str = "") -> None:
         nonlocal quantized
@@ -112,7 +115,7 @@ def _quantize_linears_on_the_fly(model: "ModelMixin", modules_to_not_convert: li
                     )
                     visit(child, child_name)
                     continue
-                helper = A16W8_INT8(device=str(device), dtype=compute_dtype)
+                helper = helper_cls(device=str(device), dtype=compute_dtype)
                 setattr(module, name, helper.from_linear(child))
                 quantized += 1
             else:
@@ -133,8 +136,8 @@ class GemLiteQuantizer(DiffusersQuantizer):
       (`W_q`, `scales`, `zeros`, `metadata`, `orig_shape`, `meta_scale`) through the low-memory loader.
     - **On-the-fly quantization** (`pre_quantized=False`): the model is loaded with its original fp16/bf16
       `nn.Linear` layers (no module swap before weight loading), then every eligible linear layer is packed
-      in-place into a `GemLiteLinearTriton` via the `A16W8_INT8` helper at the end of weight loading. Only the
-      INT8 weight-only scheme (`weight_quant_format="int8"`) is supported initially.
+      in-place into a `GemLiteLinearTriton` via the selected A16W8 GemLite helper at the end of weight loading.
+      `weight_quant_format="int8"` uses `A16W8_INT8`; `weight_quant_format="fp8"` uses `A16W8_FP8`.
     """
 
     requires_calibration = False
@@ -160,9 +163,10 @@ class GemLiteQuantizer(DiffusersQuantizer):
             raise ImportError("GemLite is installed but its core linear module could not be imported.") from error
 
         if not self.pre_quantized:
-            if self.weight_quant_format != "int8":
+            if self.weight_quant_format not in ("int8", "fp8"):
                 raise ValueError(
-                    f"GemLite on-the-fly quantization currently only supports `weight_quant_format='int8'`, "
+                    "GemLite on-the-fly quantization currently only supports `weight_quant_format='int8'` and "
+                    f"`weight_quant_format='fp8'`, "
                     f"got {self.weight_quant_format!r}."
                 )
             if not torch.cuda.is_available():
@@ -267,7 +271,9 @@ class GemLiteQuantizer(DiffusersQuantizer):
         from gemlite.core import GemLiteLinearTriton
 
         if not self.pre_quantized:
-            quantized = _quantize_linears_on_the_fly(model, self.modules_to_not_convert, self.compute_dtype)
+            quantized = _quantize_linears_on_the_fly(
+                model, self.modules_to_not_convert, self.compute_dtype, self.weight_quant_format
+            )
             if quantized == 0:
                 logger.warning("No linear modules were quantized with GemLite on-the-fly.")
             return model
