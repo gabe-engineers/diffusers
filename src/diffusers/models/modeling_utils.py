@@ -1411,6 +1411,11 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
             "error_msgs": error_msgs,
         }
 
+        # Quantizers may need to finalize module state before dispatch reads `model.state_dict()`.
+        if hf_quantizer is not None:
+            hf_quantizer.postprocess_model(model)
+            model.hf_quantizer = hf_quantizer
+
         # Dispatch model with hooks on all devices if necessary
         if device_map is not None:
             device_map_kwargs = {
@@ -1419,10 +1424,6 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
                 "offload_index": offload_index,
             }
             dispatch_model(model, **device_map_kwargs)
-
-        if hf_quantizer is not None:
-            hf_quantizer.postprocess_model(model)
-            model.hf_quantizer = hf_quantizer
 
         if (
             torch_dtype is not None
